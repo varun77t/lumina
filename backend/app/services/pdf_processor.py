@@ -1,17 +1,13 @@
-import os
-import json
 import uuid
-from PyPDF2 import PdfReader
+from pypdf import PdfReader
 from app.config import settings
 
-try:
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-except Exception:
-    RecursiveCharacterTextSplitter = None
+# Preferred places to end a chunk, from strongest to weakest boundary
+SEPARATORS = ("\n\n", "\n", ". ", " ")
 
 
-def extract_text_from_pdf(file_path: str) -> list[dict]:
-    """Extract text from PDF, returning list of {page_number, text} dicts."""
+def read_pdf(file_path: str) -> tuple[int, list[dict]]:
+    """Return the page count and the non-empty pages as {page_number, text} dicts."""
     reader = PdfReader(file_path)
     pages = []
     for i, page in enumerate(reader.pages):
@@ -21,7 +17,38 @@ def extract_text_from_pdf(file_path: str) -> list[dict]:
                 "page_number": i + 1,
                 "text": text.strip()
             })
-    return pages
+    return len(reader.pages), pages
+
+
+def extract_text_from_pdf(file_path: str) -> list[dict]:
+    """Extract text from PDF, returning list of {page_number, text} dicts."""
+    return read_pdf(file_path)[1]
+
+
+def _split_text(text: str, chunk_size: int, chunk_overlap: int) -> list[tuple[int, int]]:
+    """Split text into overlapping (start, end) spans that end on natural boundaries where possible."""
+    spans = []
+    start = 0
+
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+        if end < len(text):
+            window = text[start:end]
+            for separator in SEPARATORS:
+                cut = window.rfind(separator)
+                if cut > chunk_size // 2:
+                    end = start + cut + len(separator)
+                    break
+        spans.append((start, end))
+        if end >= len(text):
+            break
+
+        # Overlap with the previous chunk, starting on a word boundary
+        next_start = end - chunk_overlap
+        space = text.find(" ", next_start, end)
+        start = space + 1 if space != -1 else next_start
+
+    return spans
 
 
 def chunk_text(pages: list[dict], chunk_size: int = None, chunk_overlap: int = None) -> list[dict]:
@@ -33,63 +60,18 @@ def chunk_text(pages: list[dict], chunk_size: int = None, chunk_overlap: int = N
 
     for page_data in pages:
         text = page_data["text"]
-        page_number = page_data["page_number"]
-        if RecursiveCharacterTextSplitter is not None:
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                separators=["\n\n", "\n", ". ", " ", ""],
-            )
-            page_chunks = splitter.split_text(text)
-            cursor = 0
-
-            for chunk_text_content in page_chunks:
-                start = text.find(chunk_text_content[:40], cursor)
-                if start < 0:
-                    start = cursor
-                end = min(start + len(chunk_text_content), len(text))
-                cursor = end
-
-                if chunk_text_content.strip():
-                    chunks.append({
-                        "chunk_id": str(uuid.uuid4()),
-                        "text": chunk_text_content.strip(),
-                        "page_number": page_number,
-                        "chunk_index": chunk_index,
-                        "start_char": start,
-                        "end_char": end
-                    })
-                    chunk_index += 1
-            continue
-
-        start = 0
-        while start < len(text):
-            end = start + chunk_size
-            chunk_text_content = text[start:end]
-
-            if chunk_text_content.strip():
-                chunks.append({
-                    "chunk_id": str(uuid.uuid4()),
-                    "text": chunk_text_content.strip(),
-                    "page_number": page_number,
-                    "chunk_index": chunk_index,
-                    "start_char": start,
-                    "end_char": min(end, len(text))
-                })
-                chunk_index += 1
-
-            start += chunk_size - chunk_overlap
+        for start, end in _split_text(text, chunk_size, chunk_overlap):
+            chunk_text_content = text[start:end].strip()
+            if not chunk_text_content:
+                continue
+            chunks.append({
+                "chunk_id": str(uuid.uuid4()),
+                "text": chunk_text_content,
+                "page_number": page_data["page_number"],
+                "chunk_index": chunk_index,
+                "start_char": start,
+                "end_char": end
+            })
+            chunk_index += 1
 
     return chunks
-
-
-def get_page_count(file_path: str) -> int:
-    """Get total page count of a PDF."""
-    reader = PdfReader(file_path)
-    return len(reader.pages)
-
-
-def get_full_text(file_path: str) -> str:
-    """Get the complete text content of a PDF."""
-    pages = extract_text_from_pdf(file_path)
-    return "\n\n".join([f"[Page {p['page_number']}]\n{p['text']}" for p in pages])

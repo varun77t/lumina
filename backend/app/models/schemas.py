@@ -1,6 +1,5 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
-from datetime import datetime
 
 
 class DocumentResponse(BaseModel):
@@ -12,7 +11,7 @@ class DocumentResponse(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    question: str
+    question: str = Field(max_length=2000)
     document_id: str
 
 

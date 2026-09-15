@@ -1,33 +1,24 @@
 import hashlib
+import logging
 import math
 import re
+from google.genai import types
 from app.config import settings
+from app.services.gemini import get_client
 
-try:
-    from sentence_transformers import SentenceTransformer
-except Exception:
-    SentenceTransformer = None
+logger = logging.getLogger(__name__)
 
-try:
-    import google.generativeai as genai
-except Exception:
-    genai = None
-
-_model = None
+# The Gemini API accepts at most 100 texts per embedding request
+BATCH_SIZE = 100
+HASH_DIMENSIONS = 384
 
 
-def get_model():
-    """Get or initialize the sentence transformer model."""
-    global _model
-    if SentenceTransformer is None:
-        return None
-    if _model is None:
-        _model = SentenceTransformer(settings.EMBEDDING_MODEL)
-    return _model
+class EmbeddingError(RuntimeError):
+    """Embeddings could not be generated, e.g. the Gemini API is unreachable or rate limited."""
 
 
-def _hash_embedding(text: str, dimensions: int = 384) -> list[float]:
-    """Deterministic fallback embedding for local development without sentence-transformers."""
+def _hash_embedding(text: str, dimensions: int = HASH_DIMENSIONS) -> list[float]:
+    """Deterministic keyword embedding for local development without a Gemini key."""
     vector = [0.0] * dimensions
     tokens = re.findall(r"[A-Za-z0-9]+", text.lower())
 
@@ -41,43 +32,43 @@ def _hash_embedding(text: str, dimensions: int = 384) -> list[float]:
     return [value / norm for value in vector]
 
 
-def generate_embeddings(texts: list[str]) -> list[list[float]]:
-    """Generate embeddings for a list of texts."""
-    # 1. Try Gemini Embeddings API first if key is configured
-    if settings.GOOGLE_API_KEY and genai is not None:
+def _gemini_embeddings(texts: list[str], task_type: str) -> list[list[float]]:
+    client = get_client()
+    vectors = []
+
+    for start in range(0, len(texts), BATCH_SIZE):
+        batch = texts[start:start + BATCH_SIZE]
         try:
-            genai.configure(api_key=settings.GOOGLE_API_KEY)
-            result = genai.embed_content(
-                model="models/gemini-embedding-001",
-                content=texts,
-                task_type="retrieval_document"
+            response = client.models.embed_content(
+                model=settings.EMBEDDING_MODEL,
+                contents=batch,
+                config=types.EmbedContentConfig(task_type=task_type),
             )
-            return result["embedding"]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception("Gemini embedding request failed")
+            raise EmbeddingError("The embedding service is unavailable. Please try again shortly.") from e
 
-    # 2. Try sentence-transformers if installed
-    model = get_model()
-    if model is not None:
-        embeddings = model.encode(texts, show_progress_bar=False)
-        return embeddings.tolist()
+        embeddings = response.embeddings or []
+        if len(embeddings) != len(batch):
+            raise EmbeddingError(f"Expected {len(batch)} embeddings from Gemini but received {len(embeddings)}")
+        vectors.extend(list(embedding.values) for embedding in embeddings)
 
-    # 3. Dummy hash embedding fallback
-    return [_hash_embedding(text) for text in texts]
+    return vectors
+
+
+def generate_embeddings(texts: list[str]) -> list[list[float]]:
+    """Generate document embeddings.
+
+    The provider depends only on configuration, never on whether a request happened to fail,
+    so a document and the questions asked about it are always embedded the same way.
+    """
+    if not settings.GOOGLE_API_KEY:
+        return [_hash_embedding(text) for text in texts]
+    return _gemini_embeddings(texts, "RETRIEVAL_DOCUMENT")
 
 
 def generate_single_embedding(text: str) -> list[float]:
-    """Generate embedding for a single text."""
-    if settings.GOOGLE_API_KEY and genai is not None:
-        try:
-            genai.configure(api_key=settings.GOOGLE_API_KEY)
-            result = genai.embed_content(
-                model="models/gemini-embedding-001",
-                content=text,
-                task_type="retrieval_query"
-            )
-            return result["embedding"]
-        except Exception:
-            pass
-
-    return generate_embeddings([text])[0]
+    """Generate the embedding for a search query."""
+    if not settings.GOOGLE_API_KEY:
+        return _hash_embedding(text)
+    return _gemini_embeddings([text], "RETRIEVAL_QUERY")[0]

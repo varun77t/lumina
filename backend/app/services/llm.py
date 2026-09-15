@@ -1,23 +1,29 @@
+import logging
 import re
+from google.genai import types
 from app.config import settings
+from app.services.gemini import get_client
 
-try:
-    import google.generativeai as genai
-except Exception:
-    genai = None
+logger = logging.getLogger(__name__)
 
-if settings.GOOGLE_API_KEY and genai is not None:
-    genai.configure(api_key=settings.GOOGLE_API_KEY)
-
-
-def get_gemini_model():
-    """Get Gemini model instance."""
-    if not settings.GOOGLE_API_KEY or genai is None:
-        raise RuntimeError("GOOGLE_API_KEY is not configured")
-    return genai.GenerativeModel("gemini-2.5-flash")
+# No tools are used, so turn off automatic function calling
+GENERATION_CONFIG = types.GenerateContentConfig(
+    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+)
 
 
-def _extractive_fallback(question: str, context_chunks: list[dict], error_message: str = None) -> str:
+def _generate(prompt: str) -> str:
+    response = get_client().models.generate_content(
+        model=settings.GEMINI_MODEL,
+        contents=prompt,
+        config=GENERATION_CONFIG,
+    )
+    if not response.text:
+        raise RuntimeError("Gemini returned an empty response")
+    return response.text
+
+
+def _extractive_fallback(question: str, context_chunks: list[dict], gemini_failed: bool = False) -> str:
     """Return a grounded local answer when Gemini is not configured or fails."""
     keywords = {
         word.lower()
@@ -30,7 +36,7 @@ def _extractive_fallback(question: str, context_chunks: list[dict], error_messag
         text = chunk["text"].strip()
         lower_text = text.lower()
         if not keywords or any(keyword in lower_text for keyword in keywords):
-            selected.append(f"Page {chunk['page_number']}: {text[:550]}")
+            selected.append(f"**Page {chunk['page_number']}:** {text[:550]}")
         if len(selected) >= 3:
             break
 
@@ -38,14 +44,17 @@ def _extractive_fallback(question: str, context_chunks: list[dict], error_messag
         return "The uploaded document does not contain enough information to answer this question."
 
     prefix = "Gemini is not configured, so Lumina is showing the most relevant retrieved PDF context instead.\n\n"
-    if error_message:
-        prefix = f"Gemini API Error ({error_message}). Lumina is showing the most relevant retrieved PDF context instead:\n\n"
+    if gemini_failed:
+        prefix = "Gemini is temporarily unavailable, so Lumina is showing the most relevant retrieved PDF context instead.\n\n"
 
     return prefix + "\n\n".join(selected)
 
 
 def generate_rag_response(question: str, context_chunks: list[dict], document_name: str) -> str:
     """Generate a RAG response using Gemini with retrieved context."""
+    if not settings.GOOGLE_API_KEY:
+        return _extractive_fallback(question, context_chunks)
+
     context_text = "\n\n".join([
         f"[Source: {document_name} - Page {chunk['page_number']}]\n{chunk['text']}"
         for chunk in context_chunks
@@ -66,14 +75,13 @@ DOCUMENT CONTEXT:
 USER QUESTION:
 {question}
 
-Provide a clear, well-structured answer. Reference the source pages when citing information."""
+Provide a clear, well-structured answer using Markdown formatting where it helps. Write formulas in plain text rather than LaTeX. Reference the source pages when citing information."""
 
     try:
-        model = get_gemini_model()
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return _extractive_fallback(question, context_chunks, error_message=str(e))
+        return _generate(prompt)
+    except Exception:
+        logger.exception("Gemini answer generation failed")
+        return _extractive_fallback(question, context_chunks, gemini_failed=True)
 
 
 def generate_summary(chunks: list[dict], document_name: str) -> dict:
@@ -105,17 +113,19 @@ KEY TAKEAWAYS:
 IMPORTANT: Base your summary ONLY on the provided content. Do not hallucinate or add external information."""
 
     try:
-        model = get_gemini_model()
-        response = model.generate_content(prompt)
-        response_text = response.text
+        response_text = _generate(prompt)
     except Exception:
+        if settings.GOOGLE_API_KEY:
+            logger.exception("Gemini summary generation failed")
         excerpt = " ".join(chunk["text"].strip() for chunk in chunks[:8])
         summary_text = excerpt[:1400] if excerpt else "No readable text was found in this document."
         return {
             "summary": summary_text,
             "key_takeaways": [
                 f"Content was extracted from {document_name}.",
-                "Configure GOOGLE_API_KEY to enable Gemini-generated summaries.",
+                "Gemini was unavailable, so this is an excerpt rather than a generated summary."
+                if settings.GOOGLE_API_KEY
+                else "Configure GOOGLE_API_KEY to enable Gemini-generated summaries.",
                 "Retrieved summary text is limited to the indexed PDF context.",
             ],
         }
