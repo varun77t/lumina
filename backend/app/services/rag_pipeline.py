@@ -1,20 +1,24 @@
-from app.services.pdf_processor import extract_text_from_pdf, chunk_text, get_page_count
+from pypdf.errors import PdfReadError
+from app.services.pdf_processor import read_pdf, chunk_text
 from app.services.vector_store import store_chunks, query_chunks, get_all_chunks
 from app.services.llm import generate_rag_response, generate_summary
 
 
-def process_pdf(file_path: str, document_id: str) -> dict:
-    """Full pipeline: extract text, chunk, embed, and store in ChromaDB."""
-    # Extract text from PDF
-    pages = extract_text_from_pdf(file_path)
-    page_count = get_page_count(file_path)
+class UnreadablePdfError(ValueError):
+    """The PDF is malformed or has no extractable text."""
 
-    # Chunk the text
+
+def process_pdf(file_path: str, document_id: str) -> dict:
+    """Full pipeline: extract text, chunk, embed, and store in the vector index."""
+    try:
+        page_count, pages = read_pdf(file_path)
+    except PdfReadError as e:
+        raise UnreadablePdfError("This PDF could not be read") from e
+
     chunks = chunk_text(pages)
     if not chunks:
-        raise ValueError("No readable text was found in this PDF")
+        raise UnreadablePdfError("No readable text was found in this PDF. Scanned PDFs need OCR before uploading.")
 
-    # Store in ChromaDB with embeddings
     stored_count = store_chunks(document_id, chunks)
 
     return {

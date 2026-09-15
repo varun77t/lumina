@@ -1,31 +1,27 @@
+import logging
 import os
 import uuid
-import json
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
-from app.middleware.auth import verify_token
-from app.services.rag_pipeline import process_pdf
 from app.config import settings
+from app.middleware.auth import verify_token
+from app.services import document_store
+from app.services.pdf_processor import extract_text_from_pdf
+from app.services.rag_pipeline import UnreadablePdfError, process_pdf
+from app.services.vector_store import delete_collection
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Simple JSON-based document metadata store
-METADATA_FILE = os.path.join(settings.UPLOAD_DIR, "metadata.json")
 
-
-def load_metadata() -> dict:
-    """Load document metadata from JSON file."""
-    if os.path.exists(METADATA_FILE):
-        with open(METADATA_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-
-def save_metadata(metadata: dict):
-    """Save document metadata to JSON file."""
-    with open(METADATA_FILE, "w") as f:
-        json.dump(metadata, f, indent=2)
+def _delete_document_files(document_id: str) -> None:
+    path = document_store.pdf_path(document_id)
+    if os.path.exists(path):
+        os.remove(path)
+    delete_collection(document_id)
 
 
 @router.post("/upload")
@@ -34,54 +30,48 @@ async def upload_pdf(file: UploadFile = File(...), user: dict = Depends(verify_t
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
 
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    content = await file.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"PDFs must be {settings.MAX_UPLOAD_MB} MB or smaller")
+    if not content.startswith(b"%PDF-"):
+        raise HTTPException(status_code=400, detail="This file is not a valid PDF")
+
     # Generate unique document ID
     document_id = str(uuid.uuid4())
-
-    # Save file
-    file_path = os.path.join(settings.UPLOAD_DIR, f"{document_id}.pdf")
-    content = await file.read()
+    file_path = document_store.pdf_path(document_id)
+    filename = os.path.basename(file.filename)
 
     with open(file_path, "wb") as f:
         f.write(content)
 
     try:
-        # Process through RAG pipeline
-        result = process_pdf(file_path, document_id)
+        # Embedding calls take seconds, so keep them off the event loop
+        result = await run_in_threadpool(process_pdf, file_path, document_id)
+    except UnreadablePdfError as e:
+        _delete_document_files(document_id)
+        raise HTTPException(status_code=422, detail=str(e))
+    except BaseException:
+        _delete_document_files(document_id)
+        raise
 
-        # Store metadata
-        metadata = load_metadata()
-        metadata[document_id] = {
-            "id": document_id,
-            "filename": file.filename,
-            "page_count": result["page_count"],
-            "chunks_stored": result["chunks_stored"],
-            "uploaded_at": datetime.utcnow().isoformat(),
-            "user_id": user["sub"],
-            "file_path": file_path
-        }
-        save_metadata(metadata)
+    doc = {
+        "id": document_id,
+        "filename": filename,
+        "page_count": result["page_count"],
+        "chunks_stored": result["chunks_stored"],
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "user_id": user["sub"],
+    }
+    document_store.add_document(doc)
 
-        return {
-            "id": document_id,
-            "filename": file.filename,
-            "page_count": result["page_count"],
-            "chunks_stored": result["chunks_stored"],
-            "uploaded_at": metadata[document_id]["uploaded_at"],
-            "user_id": user["sub"]
-        }
-
-    except Exception as e:
-        # Cleanup on failure
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        raise HTTPException(status_code=500, detail=f"Failed to process PDF: {str(e)}")
+    return {key: doc[key] for key in ("id", "filename", "page_count", "chunks_stored", "uploaded_at", "user_id")}
 
 
 @router.get("/documents")
 async def list_documents(user: dict = Depends(verify_token)):
-    """List all documents for the authenticated user."""
-    metadata = load_metadata()
-    user_docs = [
+    """List all documents for the authenticated user, newest first."""
+    documents = [
         {
             "id": doc["id"],
             "filename": doc["filename"],
@@ -89,55 +79,30 @@ async def list_documents(user: dict = Depends(verify_token)):
             "uploaded_at": doc["uploaded_at"],
             "user_id": doc["user_id"]
         }
-        for doc in metadata.values()
-        if doc["user_id"] == user["sub"]
+        for doc in document_store.list_documents(user["sub"])
     ]
-    # Sort by upload date, newest first
-    user_docs.sort(key=lambda x: x["uploaded_at"], reverse=True)
-    return {"documents": user_docs}
+    return {"documents": documents}
 
 
 @router.delete("/documents/{document_id}")
 async def delete_document(document_id: str, user: dict = Depends(verify_token)):
     """Delete a document and its embeddings."""
-    metadata = load_metadata()
-
-    if document_id not in metadata:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    doc = metadata[document_id]
-    if doc["user_id"] != user["sub"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    # Delete file
-    if os.path.exists(doc["file_path"]):
-        os.remove(doc["file_path"])
-
-    # Delete from ChromaDB
-    from app.services.vector_store import delete_collection
-    delete_collection(document_id)
-
-    # Remove metadata
-    del metadata[document_id]
-    save_metadata(metadata)
-
+    document_store.get_user_document(document_id, user)
+    document_store.remove_document(document_id)
+    _delete_document_files(document_id)
     return {"message": "Document deleted successfully"}
 
 
 @router.get("/documents/{document_id}/text")
 async def get_document_text(document_id: str, user: dict = Depends(verify_token)):
     """Get the extracted text of a document organized by page."""
-    metadata = load_metadata()
+    doc = document_store.get_user_document(document_id, user)
+    path = document_store.pdf_path(document_id)
 
-    if document_id not in metadata:
-        raise HTTPException(status_code=404, detail="Document not found")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="PDF file not found")
 
-    doc = metadata[document_id]
-    if doc["user_id"] != user["sub"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    from app.services.pdf_processor import extract_text_from_pdf
-    pages = extract_text_from_pdf(doc["file_path"])
+    pages = await run_in_threadpool(extract_text_from_pdf, path)
 
     return {
         "document_id": document_id,
@@ -150,20 +115,14 @@ async def get_document_text(document_id: str, user: dict = Depends(verify_token)
 @router.get("/documents/{document_id}/file")
 async def get_document_file(document_id: str, user: dict = Depends(verify_token)):
     """Return the original PDF file for authenticated in-app preview."""
-    metadata = load_metadata()
+    doc = document_store.get_user_document(document_id, user)
+    path = document_store.pdf_path(document_id)
 
-    if document_id not in metadata:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    doc = metadata[document_id]
-    if doc["user_id"] != user["sub"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    if not os.path.exists(doc["file_path"]):
+    if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="PDF file not found")
 
     return FileResponse(
-        doc["file_path"],
+        path,
         media_type="application/pdf",
         filename=doc["filename"],
     )

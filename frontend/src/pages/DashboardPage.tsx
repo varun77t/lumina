@@ -30,8 +30,8 @@ export default function DashboardPage() {
     try {
       const data = await api.getDocuments()
       setDocuments(data.documents)
-    } catch (err) {
-      console.error('Failed to fetch documents:', err)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to fetch documents')
     } finally {
       setLoading(false)
     }

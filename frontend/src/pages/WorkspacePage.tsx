@@ -15,6 +15,7 @@ import {
   WandSparkles,
 } from 'lucide-react'
 import { BrandMark } from '@/components/layout/BrandMark'
+import { MarkdownMessage } from '@/components/workspace/MarkdownMessage'
 import { TypingIndicator } from '@/components/workspace/TypingIndicator'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -34,26 +35,6 @@ const starterQuestions = [
   'List the most important concepts with page references.',
   'What decisions or recommendations does the document make?',
 ]
-
-function formatAnswer(content: string) {
-  return content.split('\n').map((line, index) => {
-    const trimmed = line.trim()
-    if (!trimmed) return <div key={index} className="h-3" />
-    if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-      return (
-        <p key={index} className="pl-4 text-white/70">
-          <span className="mr-2 text-white/35">-</span>
-          {trimmed.slice(2)}
-        </p>
-      )
-    }
-    return (
-      <p key={index} className="text-white/76">
-        {trimmed}
-      </p>
-    )
-  })
-}
 
 function CitationList({ sources }: { sources?: SourceCitation[] }) {
   if (!sources?.length) return null
@@ -204,7 +185,7 @@ export default function WorkspacePage() {
         {
           id: crypto.randomUUID(),
           role: 'assistant',
-          content: `Summary\n\n${result.summary}\n\nKey takeaways\n${result.key_takeaways.map((item) => `- ${item}`).join('\n')}`,
+          content: `### Summary\n\n${result.summary}\n\n### Key takeaways\n\n${result.key_takeaways.map((item) => `- ${item}`).join('\n')}`,
         },
       ])
     } catch (err: unknown) {
@@ -373,8 +354,10 @@ export default function WorkspacePage() {
                                 : 'max-w-[92%] rounded-3xl border border-white/[0.07] bg-white/[0.035] px-5 py-4 text-sm leading-7'
                             }
                           >
-                            {message.content ? (
-                              <div className="space-y-1.5">{formatAnswer(message.content)}</div>
+                            {message.role === 'user' ? (
+                              <p className="whitespace-pre-wrap break-words">{message.content}</p>
+                            ) : message.content ? (
+                              <MarkdownMessage content={message.content} />
                             ) : (
                               <TypingIndicator />
                             )}
