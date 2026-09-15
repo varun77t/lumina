@@ -12,8 +12,9 @@ export default function AuthPage() {
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
 
-  const { signIn, signUp } = useAuth()
+  const { signIn, signUp, configError } = useAuth()
   const navigate = useNavigate()
+  const displayError = error || configError
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -30,11 +31,13 @@ export default function AuthPage() {
           navigate('/dashboard')
         }
       } else {
-        const { error } = await signUp(email, password)
+        const { error, needsConfirmation } = await signUp(email, password)
         if (error) {
           setError(error.message)
+        } else if (needsConfirmation) {
+          setIsLogin(true)
+          setSuccess('Check your email to confirm your account, then sign in.')
         } else {
-          // Auto-redirect to dashboard on successful signup (since email confirm is toggled off)
           navigate('/dashboard')
         }
       }
@@ -144,7 +147,7 @@ export default function AuthPage() {
             </div>
 
             <AnimatePresence mode="wait">
-              {error && (
+              {displayError && (
                 <motion.div
                   initial={{ opacity: 0, y: -10 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -152,7 +155,7 @@ export default function AuthPage() {
                   className="flex items-center gap-2 text-red-400/80 text-sm bg-red-400/5 border border-red-400/10 rounded-xl px-4 py-3"
                 >
                   <AlertCircle className="w-4 h-4 shrink-0" />
-                  {error}
+                  {displayError}
                 </motion.div>
               )}
               {success && (
@@ -169,7 +172,7 @@ export default function AuthPage() {
 
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || Boolean(configError)}
               className="group w-full flex items-center justify-center gap-2 bg-white text-black py-3.5 rounded-xl font-medium text-sm hover:bg-white/90 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-[0_0_20px_rgba(255,255,255,0.15)]"
             >
               {loading ? (

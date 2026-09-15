@@ -1,39 +1,55 @@
-import { supabase } from '@/lib/supabase'
+import { bypassAuth, supabase } from '@/lib/supabase'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api'
 
-async function getAuthHeaders(): Promise<Record<string, string>> {
-  const devMode = import.meta.env.VITE_SUPABASE_URL === undefined || 
-                  import.meta.env.VITE_SUPABASE_ANON_KEY === undefined ||
-                  import.meta.env.VITE_BYPASS_AUTH === 'true'
+// Unsigned token for local development; the backend only accepts it when AUTH_BYPASS=true
+function mockToken(): string {
+  let payload = { sub: 'dev-user-id', email: 'dev@lumina.ai' }
+  const savedUser = localStorage.getItem('lumina_mock_user')
+  if (savedUser) {
+    try {
+      const user = JSON.parse(savedUser)
+      payload = { sub: user.id || payload.sub, email: user.email || payload.email }
+    } catch (e) {
+      console.error('Failed to parse mock user', e)
+    }
+  }
+  const base64Payload = btoa(JSON.stringify(payload)).replace(/=/g, '')
+  return `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.${base64Payload}.c2lnbmF0dXJl`
+}
 
-  if (devMode) {
-    const savedUser = localStorage.getItem('lumina_mock_user')
-    if (savedUser) {
-      try {
-        const user = JSON.parse(savedUser)
-        const payload = { sub: user.id || 'dev-user-id', email: user.email }
-        const base64Payload = btoa(JSON.stringify(payload)).replace(/=/g, '')
-        const token = `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.${base64Payload}.c2lnbmF0dXJl`
-        return {
-          'Authorization': `Bearer ${token}`,
-        }
-      } catch (e) {
-        console.error('Failed to parse mock user', e)
-      }
-    }
-    return {
-      'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkZXYtdXNlci1pZCIsImVtYWlsIjoiZGV2QGx1bWluYS5haSJ9.c2lnbmF0dXJl',
-    }
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  if (bypassAuth) {
+    return { Authorization: `Bearer ${mockToken()}` }
   }
 
   const { data: { session } } = await supabase.auth.getSession()
-  if (session?.access_token) {
-    return {
-      'Authorization': `Bearer ${session.access_token}`,
-    }
+  return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}
+}
+
+async function errorMessage(res: Response, fallback: string): Promise<string> {
+  const body = await res.json().catch(() => null)
+  const detail = body?.detail
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail) && typeof detail[0]?.msg === 'string') return detail[0].msg
+  return fallback
+}
+
+async function request(path: string, init: RequestInit, fallbackError: string): Promise<Response> {
+  const headers = { ...(await getAuthHeaders()), ...(init.headers as Record<string, string> | undefined) }
+  const res = await fetch(`${API_BASE}${path}`, { ...init, headers })
+  if (!res.ok) {
+    throw new Error(await errorMessage(res, fallbackError))
   }
-  return {}
+  return res
+}
+
+function postJson(body: unknown): RequestInit {
+  return {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }
 }
 
 export interface Document {
@@ -78,75 +94,35 @@ export interface DocumentTextResponse {
 
 export const api = {
   async uploadPdf(file: File): Promise<Document> {
-    const headers = await getAuthHeaders()
     const formData = new FormData()
     formData.append('file', file)
 
-    const res = await fetch(`${API_BASE}/upload`, {
-      method: 'POST',
-      headers,
-      body: formData,
-    })
-
-    if (!res.ok) {
-      const error = await res.json().catch(() => ({ detail: 'Upload failed' }))
-      throw new Error(error.detail || 'Upload failed')
-    }
-
+    const res = await request('/upload', { method: 'POST', body: formData }, 'Upload failed')
     return res.json()
   },
 
   async getDocuments(): Promise<{ documents: Document[] }> {
-    const headers = await getAuthHeaders()
-    const res = await fetch(`${API_BASE}/documents`, { headers })
-
-    if (!res.ok) throw new Error('Failed to fetch documents')
+    const res = await request('/documents', {}, 'Failed to fetch documents')
     return res.json()
   },
 
   async deleteDocument(documentId: string): Promise<void> {
-    const headers = await getAuthHeaders()
-    const res = await fetch(`${API_BASE}/documents/${documentId}`, {
-      method: 'DELETE',
-      headers,
-    })
-
-    if (!res.ok) throw new Error('Failed to delete document')
+    await request(`/documents/${documentId}`, { method: 'DELETE' }, 'Failed to delete document')
   },
 
   async getDocumentText(documentId: string): Promise<DocumentTextResponse> {
-    const headers = await getAuthHeaders()
-    const res = await fetch(`${API_BASE}/documents/${documentId}/text`, { headers })
-
-    if (!res.ok) throw new Error('Failed to fetch document text')
+    const res = await request(`/documents/${documentId}/text`, {}, 'Failed to fetch document text')
     return res.json()
   },
 
   async getDocumentFileUrl(documentId: string): Promise<string> {
-    const headers = await getAuthHeaders()
-    const res = await fetch(`${API_BASE}/documents/${documentId}/file`, { headers })
-
-    if (!res.ok) throw new Error('Failed to fetch PDF')
+    const res = await request(`/documents/${documentId}/file`, {}, 'Failed to fetch PDF')
     const blob = await res.blob()
     return URL.createObjectURL(blob)
   },
 
   async chat(documentId: string, question: string): Promise<ChatResponse> {
-    const headers = await getAuthHeaders()
-    const res = await fetch(`${API_BASE}/chat`, {
-      method: 'POST',
-      headers: {
-        ...headers,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ document_id: documentId, question }),
-    })
-
-    if (!res.ok) {
-      const error = await res.json().catch(() => ({ detail: 'Chat failed' }))
-      throw new Error(error.detail || 'Chat failed')
-    }
-
+    const res = await request('/chat', postJson({ document_id: documentId, question }), 'Chat failed')
     return res.json()
   },
 
@@ -155,17 +131,9 @@ export const api = {
     question: string,
     onToken: (token: string) => void,
   ): Promise<ChatResponse> {
-    const headers = await getAuthHeaders()
-    const res = await fetch(`${API_BASE}/chat/stream`, {
-      method: 'POST',
-      headers: {
-        ...headers,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ document_id: documentId, question }),
-    })
+    const res = await request('/chat/stream', postJson({ document_id: documentId, question }), 'Chat failed')
 
-    if (!res.ok || !res.body) {
+    if (!res.body) {
       return this.chat(documentId, question)
     }
 
@@ -204,21 +172,7 @@ export const api = {
   },
 
   async getSummary(documentId: string): Promise<SummaryResponse> {
-    const headers = await getAuthHeaders()
-    const res = await fetch(`${API_BASE}/summary`, {
-      method: 'POST',
-      headers: {
-        ...headers,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ document_id: documentId }),
-    })
-
-    if (!res.ok) {
-      const error = await res.json().catch(() => ({ detail: 'Summary failed' }))
-      throw new Error(error.detail || 'Summary failed')
-    }
-
+    const res = await request('/summary', postJson({ document_id: documentId }), 'Summary failed')
     return res.json()
   },
 }

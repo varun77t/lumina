@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react'
-import { supabase } from '@/lib/supabase'
+import { bypassAuth, supabase, supabaseConfigured } from '@/lib/supabase'
 import type { User, Session } from '@supabase/supabase-js'
 
 interface AuthContextType {
@@ -8,59 +8,52 @@ interface AuthContextType {
   session: Session | null
   loading: boolean
   devMode: boolean
-  signUp: (email: string, password: string) => Promise<{ error: Error | null }>
+  configError: string | null
+  signUp: (email: string, password: string) => Promise<{ error: Error | null; needsConfirmation: boolean }>
   signIn: (email: string, password: string) => Promise<{ error: Error | null }>
   signOut: () => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
+const MOCK_USER_KEY = 'lumina_mock_user'
+
+function loadMockUser(): User | null {
+  const savedUser = localStorage.getItem(MOCK_USER_KEY)
+  if (!savedUser) return null
+  try {
+    return JSON.parse(savedUser)
+  } catch {
+    localStorage.removeItem(MOCK_USER_KEY)
+    return null
+  }
+}
+
+function mockSession(user: User): Session {
+  return {
+    access_token: 'mock-token',
+    token_type: 'bearer',
+    expires_in: 3600,
+    refresh_token: 'mock-refresh',
+    user,
+  } as Session
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const devMode = import.meta.env.VITE_SUPABASE_URL === undefined || 
-                  import.meta.env.VITE_SUPABASE_ANON_KEY === undefined ||
-                  import.meta.env.VITE_BYPASS_AUTH === 'true'
+  const devMode = bypassAuth
+  const configError = !devMode && !supabaseConfigured
+    ? 'Sign-in is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.'
+    : null
 
-  const [user, setUser] = useState<User | null>(() => {
-    if (devMode) {
-      const savedUser = localStorage.getItem('lumina_mock_user')
-      if (savedUser) {
-        try {
-          return JSON.parse(savedUser)
-        } catch {
-          localStorage.removeItem('lumina_mock_user')
-        }
-      }
-    }
-    return null
-  })
-
+  const [user, setUser] = useState<User | null>(() => (devMode ? loadMockUser() : null))
   const [session, setSession] = useState<Session | null>(() => {
-    if (devMode) {
-      const savedUser = localStorage.getItem('lumina_mock_user')
-      if (savedUser) {
-        try {
-          const parsedUser = JSON.parse(savedUser)
-          return {
-            access_token: 'mock-token',
-            token_type: 'bearer',
-            expires_in: 3600,
-            refresh_token: 'mock-refresh',
-            user: parsedUser
-          } as Session
-        } catch {
-          // Handled in user initializer
-        }
-      }
-    }
-    return null
+    const mockUser = devMode ? loadMockUser() : null
+    return mockUser ? mockSession(mockUser) : null
   })
-
-  const [loading, setLoading] = useState(() => {
-    return !devMode
-  })
+  const [loading, setLoading] = useState(() => !devMode && !configError)
 
   useEffect(() => {
-    if (devMode) {
+    if (devMode || configError) {
       return
     }
 
@@ -83,47 +76,41 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     )
 
     return () => subscription.unsubscribe()
-  }, [devMode])
+  }, [devMode, configError])
+
+  const signInMock = (email: string) => {
+    const mockUser = { id: 'dev-user-id', email } as User
+    localStorage.setItem(MOCK_USER_KEY, JSON.stringify(mockUser))
+    setUser(mockUser)
+    setSession(mockSession(mockUser))
+  }
 
   const signUp = async (email: string, password: string) => {
     if (devMode) {
-      const mockUser = { id: 'dev-user-id', email } as User
-      localStorage.setItem('lumina_mock_user', JSON.stringify(mockUser))
-      setUser(mockUser)
-      setSession({
-        access_token: 'mock-token',
-        token_type: 'bearer',
-        expires_in: 3600,
-        refresh_token: 'mock-refresh',
-        user: mockUser
-      } as Session)
-      return { error: null }
+      signInMock(email)
+      return { error: null, needsConfirmation: false }
     }
-    const { error } = await supabase.auth.signUp({ email, password })
-    return { error: error as Error | null }
+    if (configError) return { error: new Error(configError), needsConfirmation: false }
+
+    const { data, error } = await supabase.auth.signUp({ email, password })
+    // Without a session, Supabase is waiting for the user to confirm their email
+    return { error: error as Error | null, needsConfirmation: !error && !data.session }
   }
 
   const signIn = async (email: string, password: string) => {
     if (devMode) {
-      const mockUser = { id: 'dev-user-id', email } as User
-      localStorage.setItem('lumina_mock_user', JSON.stringify(mockUser))
-      setUser(mockUser)
-      setSession({
-        access_token: 'mock-token',
-        token_type: 'bearer',
-        expires_in: 3600,
-        refresh_token: 'mock-refresh',
-        user: mockUser
-      } as Session)
+      signInMock(email)
       return { error: null }
     }
+    if (configError) return { error: new Error(configError) }
+
     const { error } = await supabase.auth.signInWithPassword({ email, password })
     return { error: error as Error | null }
   }
 
   const signOut = async () => {
     if (devMode) {
-      localStorage.removeItem('lumina_mock_user')
+      localStorage.removeItem(MOCK_USER_KEY)
       setUser(null)
       setSession(null)
       return
@@ -132,7 +119,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, session, loading, devMode, signUp, signIn, signOut }}>
+    <AuthContext.Provider value={{ user, session, loading, devMode, configError, signUp, signIn, signOut }}>
       {children}
     </AuthContext.Provider>
   )
