@@ -1,149 +1,157 @@
 # ✨ Lumina - Premium AI PDF RAG Assistant ✨
 
-Lumina is a state-of-the-art, visually stunning, and highly performant AI-Powered PDF Retrieval-Augmented Generation (RAG) assistant. Built with a sleek glassmorphic dark-mode interface, Lumina lets you upload PDF documents, automatically index their content with cloud-powered semantic embeddings, and chat with them in real-time with full contextual awareness, citation tracking, and inline PDF page-by-page viewing.
+Lumina is an AI-powered PDF Retrieval-Augmented Generation (RAG) assistant with a sleek monochrome, glassmorphic interface. Upload PDF documents, index their content with Gemini embeddings, and chat with them with source citations, Markdown answers, generated summaries, and a side-by-side PDF viewer.
 
 ---
 
 ## 🌟 Key Features
 
-* 🚀 **Lightning-Fast AI Answers**: Powered by **Google Gemini 2.5 Flash** for highly accurate, fast, and comprehensive answers.
-* 🔍 **Premium Semantic Search**: High-dimensional vector indexing using Google Gemini's **3072-dimension embeddings**, ensuring precise retrieval of relevant sections even for complex queries.
-* 📄 **Interactive PDF Side-by-Side Workspace**: Preview your uploaded PDF directly in the workspace while talking to your AI assistant.
-* 🎯 **Reference Citations**: Automatically tracks, extracts, and highlights source pages and relevant text snippets used to formulate the AI's answers.
-* 📊 **Smart Dashboard**: A beautifully designed dashboard to upload files, manage existing documents, and monitor indexing status.
-* 🔐 **Seamless Local Auth**: Instant credentials validation supporting clean workspace separation for mock and registered users.
-* 🎨 **Breathtaking Design Aesthetics**: Premium CSS typography, harmonious dark color palettes, sleek gradients, glassmorphism, responsive flex layouts, and delightful interactive micro-animations.
+* 🚀 **Grounded AI Answers**: Powered by **Google Gemini 2.5 Flash**, answering only from the retrieved document context.
+* 🔍 **Semantic Search**: Google Gemini's **3072-dimension embeddings** (`gemini-embedding-001`) find the most relevant passages for every question.
+* 📄 **Side-by-Side Workspace**: Preview the uploaded PDF and its extracted page text while chatting.
+* 🎯 **Reference Citations**: Every answer lists the pages and chunks it was built from.
+* 📝 **Summaries**: One-click summaries with key takeaways.
+* 📊 **Dashboard**: Upload, open, and delete your documents.
+* 🔐 **Supabase Auth**: Email/password sign-in, with every API request verified on the backend.
 
 ---
 
 ## 🏗️ Technical Architecture
 
-Lumina separates indexing, semantic vector storage, and generation into a clean, modern, decouple-first architecture:
-
 ```mermaid
 graph TD
     A[User PDF Document] -->|Upload| B(FastAPI Backend)
-    B -->|Parse & Clean text| C(PyPDF2 Processor)
-    C -->|Recursive Text Splitter| D[Document Chunks]
-    D -->|Gemini Embeddings API| E[3072-Dim Embeddings Vectors]
-    E -->|Write & Index| F[(ChromaDB Vector Store)]
-    
+    B -->|Extract text per page| C(pypdf)
+    C -->|Split into overlapping chunks| D[Document Chunks]
+    D -->|Gemini Embeddings API| E[3072-Dim Embedding Vectors]
+    E -->|Write| F[(JSON Vector Index)]
+
     G[User Query] -->|Ask Questions| H(RAG Pipeline)
     H -->|Gemini Embeddings| I[Query Vector]
     I -->|Cosine Similarity Search| F
-    F -->|Retrieve Context & Pages| H
+    F -->|Top 5 chunks with pages| H
     H -->|Context + Query + Prompt| J(Google Gemini 2.5 Flash)
-    J -->|Generates Answer & Citations| K[Dynamic UI Conversation]
+    J -->|Answer & Citations| K[Workspace Chat]
 ```
+
+* PDFs are stored in `backend/uploads/`, document metadata in `backend/uploads/metadata.json`, and one vector index per document in `backend/chroma_db/`. Set `DATA_DIR` to move both folders, e.g. onto a persistent disk.
+* Without a `GOOGLE_API_KEY`, the backend still runs using keyword embeddings and extractive answers, which is useful for offline development but much less accurate.
 
 ---
 
 ## 🛠️ Technology Stack
 
-* **Frontend**: React 18, Vite, TypeScript, Vanilla CSS (harmonious HSL palettes, glassmorphism, custom micro-animations), Lucide React.
-* **Backend**: FastAPI (Python 3.10+), Uvicorn, PyPDF2, ChromaDB (Vector DB), Google Generative AI SDK.
-* **AI Engine**: Google Gemini API (`models/gemini-2.5-flash` and `models/gemini-embedding-001`).
+* **Frontend**: React 19, Vite 8, TypeScript, Tailwind CSS v4, Framer Motion, Lucide React, React Router, Supabase JS, React Markdown.
+* **Backend**: FastAPI (Python 3.12), Uvicorn, pypdf, Google Gen AI SDK (`google-genai`), PyJWT.
+* **AI Engine**: Google Gemini API (`gemini-2.5-flash` and `gemini-embedding-001`).
+* **Auth**: Supabase Auth. The backend verifies access tokens with the project's JWT signing keys (JWKS) or the legacy JWT secret.
 
 ---
 
 ## 🚀 Quick Start Guide
 
-Follow these steps to set up and run Lumina locally on your machine.
-
 ### 1. Prerequisites
-* Python 3.10 or higher
-* Node.js (v18 or higher) & npm
-* A **Google Gemini API Key** (Get one free from [Google AI Studio](https://aistudio.google.com/))
+* Python 3.12
+* Node.js 22.13+ (or 20.19+) & npm
+* A **Google Gemini API Key** from [Google AI Studio](https://aistudio.google.com/apikey)
+* A **Supabase project** with email auth enabled (optional for local development, see `AUTH_BYPASS`)
 
 ---
 
 ### 2. Backend Setup (`/backend`)
 
-1. **Navigate to backend folder**:
-   ```bash
-   cd backend
-   ```
-
-2. **Create and activate a virtual environment**:
+1. **Create and activate a virtual environment**:
    * **Windows (PowerShell)**:
      ```powershell
-     python -m venv venv
-     .\venv\Scripts\Activate.ps1
+     cd backend
+     python -m venv .venv
+     .\.venv\Scripts\Activate.ps1
      ```
    * **macOS/Linux**:
      ```bash
-     python3 -m venv venv
-     source venv/bin/activate
+     cd backend
+     python3 -m venv .venv
+     source .venv/bin/activate
      ```
 
-3. **Install Dependencies**:
+2. **Install dependencies**:
    ```bash
    pip install -r requirements.txt
    ```
 
-4. **Configure Environment Variables**:
-   Create a `.env` file in the `backend/` directory (you can copy `.env.example` as a template):
-   ```env
-   PORT=8000
-   GOOGLE_API_KEY=your_gemini_api_key_here
-   ```
+3. **Configure environment variables**: copy `.env.example` to `.env` and fill it in. For local development without Supabase, set `AUTH_BYPASS=true`.
 
-5. **Start the Backend Server**:
+4. **Start the backend server**:
    ```bash
    python -m uvicorn app.main:app --port 8000 --reload
    ```
-   The backend server will start running at `http://localhost:8000`.
+   The API runs at `http://localhost:8000`, with interactive docs at `http://localhost:8000/docs`.
 
 ---
 
 ### 3. Frontend Setup (`/frontend`)
 
-1. **Navigate to frontend folder**:
+1. **Install packages**:
    ```bash
-   cd ../frontend
-   ```
-
-2. **Install Packages**:
-   ```bash
+   cd frontend
    npm install
    ```
 
-3. **Configure Environment Variables**:
-   Create a `.env` file in the `frontend/` directory (or copy `.env.example`):
-   ```env
-   VITE_API_URL=http://localhost:8000/api
-   ```
+2. **Configure environment variables**: copy `.env.example` to `.env`. For local development without Supabase, set `VITE_BYPASS_AUTH=true` (together with `AUTH_BYPASS=true` on the backend).
 
-4. **Start the Development Server**:
+3. **Start the development server**:
    ```bash
    npm run dev
    ```
-   Open `http://localhost:5173` in your browser to experience Lumina!
+   Open `http://localhost:5173`. The Vite dev server proxies `/api` to the backend on port 8000.
 
 ---
 
-## ⚙️ Environment Variables Detailed Checklist
+## ⚙️ Environment Variables
 
 ### Backend `.env`
 | Variable | Description | Example |
 | :--- | :--- | :--- |
-| `GOOGLE_API_KEY` | Your Google AI Studio API key used for RAG generation and embedding. | `AIzaSy...` |
-| `PORT` | Local port for FastAPI. | `8000` |
+| `GOOGLE_API_KEY` | Google AI Studio API key for embeddings and answers. | `your-gemini-api-key` |
+| `SUPABASE_URL` | Supabase project URL; used to fetch the JWT signing keys that verify user tokens. | `https://your-project-ref.supabase.co` |
+| `SUPABASE_JWT_SECRET` | Only for projects still using the legacy shared JWT secret. | *(empty)* |
+| `AUTH_BYPASS` | `true` skips token verification. **Local development only.** | `false` |
+| `ALLOWED_ORIGINS` | Comma-separated frontend origins allowed by CORS. | `https://your-app.vercel.app` |
+| `DATA_DIR` | Folder for uploads and vector indexes. Defaults to `backend/`. | `/var/data` |
+| `MAX_UPLOAD_MB` | Largest accepted PDF. | `20` |
+| `GEMINI_MODEL` / `EMBEDDING_MODEL` | Optional model overrides. Changing the embedding model requires re-uploading documents. | `gemini-2.5-flash` |
 
 ### Frontend `.env`
 | Variable | Description | Example |
 | :--- | :--- | :--- |
-| `VITE_API_URL` | Endpoint of the FastAPI backend router. | `http://localhost:8000/api` |
+| `VITE_SUPABASE_URL` | Supabase project URL. | `https://your-project-ref.supabase.co` |
+| `VITE_SUPABASE_ANON_KEY` | Supabase publishable (anon) key. | `sb_publishable_...` |
+| `VITE_API_BASE_URL` | Backend API base URL. Use `/api` locally; the deployed backend URL in production. | `/api` |
+| `VITE_BYPASS_AUTH` | `true` signs in with a local mock user. **Local development only.** | `false` |
+
+> 🔒 Never commit `.env` files. Only the `.env.example` templates belong in git.
 
 ---
 
-## 🎨 Premium UI Aesthetics
+## ☁️ Deployment
 
-Lumina's design is heavily tailored for visual brilliance:
-* **Backgrounds**: Deep, cohesive background gradients (`#080710` to `#0f0c1b`) combined with colorful structural glass containers.
-* **Buttons**: Elegant hover shifts with subtle glow highlights and smooth `transition: all 0.3s ease`.
-* **Scrollbars**: Customized, minimal styling to integrate flawlessly with dark mode.
-* **Layout**: Perfectly centered CSS grids, flexible layouts, and modern sidebar workspaces that feel professional.
+### Backend on Railway
+1. Create a service from this GitHub repo and set its **Root Directory** to `/backend`. Railpack installs `requirements.txt`, uses Python from `.python-version`, and starts the API with the command in `railpack.json`.
+2. Attach a **volume** (for example at `/data`). The backend stores uploads and indexes there automatically through `RAILWAY_VOLUME_MOUNT_PATH`.
+3. Add the backend environment variables (`GOOGLE_API_KEY`, `ALLOWED_ORIGINS`, and either the Supabase settings or `AUTH_BYPASS`), then generate a public domain.
+
+### Frontend on Vercel
+1. Import this GitHub repo and set the **Root Directory** to `frontend` (Vite is detected automatically; `vercel.json` handles client-side routes).
+2. Set `VITE_API_BASE_URL` to `https://<your-railway-domain>/api` plus the Supabase or bypass variables, and deploy.
+3. Add the Vercel URL to the backend's `ALLOWED_ORIGINS`.
+
+---
+
+## 🎨 UI Design
+
+* **Palette**: A monochrome black-and-white theme with translucent glass cards and a subtle grid backdrop.
+* **Motion**: Framer Motion page transitions, hover lifts, and a typing indicator while answers stream in.
+* **Layout**: Responsive dashboard grid and a two-panel workspace with the PDF viewer beside the chat.
 
 ---
 
